@@ -57,6 +57,26 @@ docker-java-sample-webapp
 
 - When it is stopped, the corresponding containers are deleted also. But images remain. They have to be deleted using commands.
 
+## Kubernetes approach
+
+- Use docker edge channel. It has inbuilt kubernetes support.
+
+- To get kubernetes dashboard running
+
+- `kubectl cluster-info`
+- `kubectl -n kube-system edit service kubernetes-dashboard`
+- `You should see yaml representation of the service. Change type: ClusterIP to type: NodePort and save file. If it's already changed go to next step.`
+- `kubectl -n kube-system get service kubernetes-dashboard`
+
+- Now deploy the war
+
+- Use helm 2.8.2
+- `helm.exe install .`
+
+- To delete entire deployment
+- `kubectl delete deployment kissing-fish-java-sample-webapp`
+
+
 ## Extras
 
 - Log into the container
