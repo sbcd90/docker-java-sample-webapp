@@ -2,3 +2,7 @@ target/
 .idea/
 *.iml
 *.war
+
+ci/credentials.yml
+ci/ca.crt
+ci/harbor.pub

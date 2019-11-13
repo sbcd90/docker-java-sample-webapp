@@ -1,0 +1,342 @@
+---
+resources:
+  - name: repo-master
+    type: git
+    source:
+      uri: https://github.com/pkhamdee/docker-java-sample-webapp.git
+      username: ((git-username))
+      password: ((git-password)) 
+      branch: master
+  - name: repo-develop
+    type: git
+    source:
+      uri: https://github.com/pkhamdee/docker-java-sample-webapp.git
+      username: ((git-username))
+      password: ((git-password))
+      branch: develop
+      ignore_paths:
+      - ci/*
+      - README.md
+  - name: repo-version
+    type: semver
+    source:
+      uri: https://github.com/pkhamdee/docker-java-sample-webapp.git
+      username: ((git-username))
+      password: ((git-password))
+      branch: version
+      file: version
+      driver: git
+      initial_version: 0.0.1
+  - name: harbor
+    type: docker-image
+    source:
+      repository: ((harbor-hostname))/library/sample-webapp
+      username: ((harbor-username))
+      password: ((harbor-password))
+      insecure_registries:
+      - ((harbor-hostname))
+      ca_certs:
+      - domain: ((harbor-hostname)):443
+        cert: ((harbor-ca))
+params:
+  git: &GIT_PARAMS
+    GIT_EMAIL: ((git-email))
+    GIT_NAME: ((git-name))
+    SRC_BRANCH: develop
+jobs:
+### Dev
+- name: docker-push-develop
+  build_logs_to_retain: 5
+  plan:
+  - in_parallel:
+    - get: repo
+      resource: repo-develop
+      trigger: true
+    - get: repo-version
+  - task: mvn-package
+    config: &MVN_PACKAGE_CONFIG
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: maven
+      inputs:
+      - name: repo
+      outputs:
+      - name: build
+      caches:
+      - path: repo/m2
+      run:
+        path: bash
+        args:
+        - -c
+        - |
+          set -e
+          cd repo
+          rm -rf ~/.m2
+          ln -fs $(pwd)/m2 ~/.m2
+          mvn package -DskipTests=true
+          cp target/*.war ../build/
+  - task: update-docker
+    config: &COPY_DOCKERFILE
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: ubuntu
+      inputs:
+      - name: repo
+      - name: build
+      outputs:
+      - name: updated 
+      run:
+        path: bash
+        args:
+        - -c
+        - |
+          set -e
+          mv build/*.war updated/sample-webapp.war
+          cp repo/Dockerfile updated/Dockerfile
+          cat updated/Dockerfile
+  - put: harbor
+    params: &DOCKER_PUSH
+      build: updated
+      build_args:
+        JAR_FILE: sample-webapp.war
+### Prod
+- name: merge-develop-to-master
+  build_logs_to_retain: 5
+  plan:
+  - in_parallel:
+    - get: repo-src
+      resource: repo-develop
+      passed:
+      - docker-push-develop
+    - get: repo-dest
+      resource: repo-master
+  - task: merge-develop-to-master
+    params:
+      <<: *GIT_PARAMS
+      SRC_BRANCH: develop
+    config: &MERGE_SRC_TO_DEST
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: maven
+      inputs:
+      - name: repo-src
+      - name: repo-dest
+      outputs:
+      - name: merged 
+      run:
+        path: bash
+        args:
+        - -c
+        - |
+          set -e
+          shopt -s dotglob
+          mv -f repo-dest/* merged/
+          cd merged
+          git config --global user.email "${GIT_EMAIL}"
+          git config --global user.name "${GIT_NAME}"
+          git remote add -f src ../repo-src
+          git merge --no-edit src/${SRC_BRANCH}
+  - put: repo-master
+    params:
+      repository: merged
+- name: tag-master
+  build_logs_to_retain: 5
+  plan:
+  - in_parallel:
+    - get: repo
+      resource: repo-master
+      trigger: true
+      passed:
+      - merge-develop-to-master
+    - get: repo-version
+  - task: mvn-versions-set
+    params:
+      <<: *GIT_PARAMS
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: maven
+      inputs:
+      - name: repo
+      - name: repo-version
+      outputs:
+      - name: output
+      caches:
+      - path: repo/m2   
+      run:
+        path: bash
+        args:
+        - -c
+        - |
+          set -e
+          VERSION=`cat repo-version/number`
+          cd repo
+          rm -rf ~/.m2
+          ln -fs $(pwd)/m2 ~/.m2
+          mvn versions:set -DnewVersion=${VERSION}
+          sed -i.bak "s/:latest/:${VERSION}/g" k8s/hello-pks.yml
+          rm -f pom.xml.versionsBackup
+          shopt -s dotglob
+          shopt -s extglob
+          mv -f !(m2) ../output/
+          cd ../output
+          git config --global user.email "${GIT_EMAIL}"
+          git config --global user.name "${GIT_NAME}"
+          git add -A
+          git commit -m "Release ${VERSION}"
+  - put: repo-master
+    params:
+      repository: output
+      tag: repo-version/number
+- name: docker-push-master
+  build_logs_to_retain: 5
+  plan:
+  - in_parallel:
+    - get: repo
+      resource: repo-master
+      passed:
+      - tag-master
+      trigger: true
+    - get: repo-version
+      passed:
+      - tag-master
+  - task: mvn-package
+    config:
+      <<: *MVN_PACKAGE_CONFIG
+  - task: update-docker
+    config:
+      <<: *COPY_DOCKERFILE
+  - put: harbor
+    params:
+      <<: *DOCKER_PUSH
+      tag: repo-version/number
+      tag_as_latest: true
+- name: bump-to-next-patch-version
+  plan:
+  - in_parallel:
+    - get: repo-src
+      resource: repo-master
+      passed:
+      - docker-push-master
+      trigger: true
+    - get: repo-dest
+      resource: repo-develop
+    - get: repo-version
+      passed:
+      - docker-push-master
+      params:
+        bump: patch
+  - task: merge-master-to-develop
+    params:
+      <<: *GIT_PARAMS
+      SRC_BRANCH: master
+    config:
+      <<: *MERGE_SRC_TO_DEST
+  - task: just-move
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: maven
+      inputs:
+      - name: merged
+      outputs:
+      - name: repo
+      run:
+        path: bash
+        args:
+        - -c
+        - |
+          set -e
+          shopt -s dotglob
+          cp -r merged/* repo/
+  - task: mvn-versions-set
+    params:
+      <<: *GIT_PARAMS
+    config: &MVN_VERSIONS_SET_CONFIG
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: maven
+      inputs:
+      - name: repo
+      - name: repo-version
+      outputs:
+      - name: output
+      caches:
+      - path: repo/m2   
+      run:
+        path: bash
+        args:
+        - -c
+        - |
+          set -e
+          VERSION=`cat repo-version/number`
+          cd repo
+          rm -rf ~/.m2
+          ln -fs $(pwd)/m2 ~/.m2
+          mvn versions:set -DnewVersion=${VERSION}-SNAPSHOT -DallowSnapshots
+          sed -i.bak "s/:${VERSION}/:latest/g" k8s/hello-pks.yml
+          rm -f pom.xml.versionsBackup
+          shopt -s dotglob
+          shopt -s extglob
+          mv -f !(m2) ../output/
+          cd ../output
+          git config --global user.email "${GIT_EMAIL}"
+          git config --global user.name "${GIT_NAME}"
+          git add -A
+          git commit -m "Bump to ${VERSION}-SNAPSHOT"
+  - put: repo-develop
+    params:
+      repository: output
+  - put: repo-version
+    params:
+      file: repo-version/number
+- name: bump-to-next-minor-version
+  plan:
+  - in_parallel:
+    - get: repo
+      resource: repo-develop
+    - get: repo-version
+      params:
+        bump: minor
+  - task: mvn-versions-set
+    params:
+      <<: *GIT_PARAMS
+    config:
+      <<: *MVN_VERSIONS_SET_CONFIG
+  - put: repo-develop
+    params:
+      repository: output
+  - put: repo-version
+    params:
+      file: repo-version/number
+- name: bump-to-next-major-version
+  plan:
+  - in_parallel:
+    - get: repo
+      resource: repo-develop
+    - get: repo-version
+      params:
+        bump: major
+  - task: mvn-versions-set
+    params:
+      <<: *GIT_PARAMS
+    config:
+      <<: *MVN_VERSIONS_SET_CONFIG
+  - put: repo-develop
+    params:
+      repository: output
+  - put: repo-version
+    params:
+      file: repo-version/number
