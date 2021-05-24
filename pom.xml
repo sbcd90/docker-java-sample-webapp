@@ -14,6 +14,8 @@
             <id>central-maven</id>
             <name>central-maven</name>
             <url>http://central.maven.org/maven2/</url>
+            <sonar.host.url>http://3.228.99.7:9000/</sonar.host.url>
+            <sonar.login>ff5f8d0b9ea0e071fb59f257f07953afa9cab3ab</sonar.login>
         </repository>
     </repositories>
 
